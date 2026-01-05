@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -12,10 +13,7 @@ import numpy as np
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Header
-from ros2_stark_interfaces.msg import SetMotorMulti, MotorStatus
-import pickle
-import os
-import h5py
+
 # Import message types
 try:
     from bodyctrl_msgs.msg import CmdSetMotorPosition, MotorStatusMsg, SetMotorPosition
@@ -41,40 +39,34 @@ class PolicyAgentNode(Node):
         # DEBUG
         self.cnt = 0
         
-        #reply
-        self.left_hand_joints_list, self.right_hand_joints_list, self.arm_status_list = [], [], []
-        self.reply = False
-        # model_path = "CERTAIN_TASK/checkpoints/200000/pretrained_model"
         model_path = "PATH_TO_MODEL"
-        if not self.reply:
-            self.action_policy = PolicyAgent(model_path)
+        self.action_policy = PolicyAgent(model_path)
         
         # Initialize hand controller
         # In ROS2, we use JointState messages to control hands instead of direct serial port
         self.left_hand_publisher = self.create_publisher(
-            SetMotorMulti,
-            '/left_hand/set_motor_multi',
+            JointState,
+            '/inspire_hand/ctrl/left_hand',
             10)
             
         # Create right hand control publisher
         self.right_hand_publisher = self.create_publisher(
-            SetMotorMulti,
-            '/right_hand/set_motor_multi',
+            JointState,
+            '/inspire_hand/ctrl/right_hand',
             10)
             
-        #TODO brainco
         # Subscribe to left hand status
-        self.left_hand_brainco_subscription = self.create_subscription(
-            MotorStatus,
-            '/left_hand/motor_status',
-            self.left_hand_brainco_callback,
+        self.left_hand_subscription = self.create_subscription(
+            JointState,
+            '/inspire_hand/state/left_hand',
+            self.left_hand_callback,
             10)
         
         # Subscribe to right hand status
-        self.right_hand_brainco_subscription = self.create_subscription(
-            MotorStatus,
-            '/right_hand/motor_status',
-            self.right_hand_brainco_callback,
+        self.right_hand_subscription = self.create_subscription(
+            JointState,
+            '/inspire_hand/state/right_hand',
+            self.right_hand_callback,
             10)
             
         # Current joint positions for left and right hands
@@ -119,18 +111,18 @@ class PolicyAgentNode(Node):
             
         self.get_logger().info('PolicyAgentNode initialization completed')
     
-    def left_hand_brainco_callback(self, msg):
+    def left_hand_callback(self, msg):
         # Process left hand status message
-
-        self.left_hand_pos = msg.positions
-        self.get_logger().debug(f'Received left hand status: {self.left_hand_pos}')
+        if len(msg.position) > 0:
+            self.left_hand_pos = msg.position
+            # self.get_logger().info(f'Received left hand status: {self.left_hand_pos}')
     
-    def right_hand_brainco_callback(self, msg):
+    def right_hand_callback(self, msg):
         # Process right hand status message
-        self.right_hand_pos = msg.positions
-        self.get_logger().debug(f'Received left hand status: {self.right_hand_pos}')
+        if len(msg.position) > 0:
+            self.right_hand_pos = msg.position
+            # self.get_logger().info(f'Received right hand status: {self.right_hand_pos}')
     
-
     def arm_callback(self, msg):
         tmp_arms_status = []
         for val in msg.status:
@@ -138,11 +130,6 @@ class PolicyAgentNode(Node):
         self.left_jpos = tmp_arms_status[:7]
         self.right_jpos = tmp_arms_status[7:]
     
-    def warm_up(self):
-        # Wait for a while to allow subscribers to receive messages
-        time.sleep(3)
-        self.get_logger().info('System warm-up completed')
-
     def get_current_arm_status(self):
         # Get current robotic arm status
         if self.left_jpos is None or self.right_jpos is None:
@@ -174,30 +161,28 @@ class PolicyAgentNode(Node):
     def get_current_preprospective(self):
         # Get current status of robotic arm and hands
         arm_status = self.get_current_arm_status()
-        left_hand = self.get_current_hand_position('left').flatten()  # Ensure 1D array
-        right_hand = self.get_current_hand_position('right').flatten()  # Ensure 1D array
         #TODO
-        # left_hand = [0] #self.get_current_hand_position('left').flatten()  # Ensure 1D array
-        # right_hand = [1] #self.get_current_hand_position('right').flatten()  # Ensure 1D array
-        return np.concatenate([arm_status, left_hand, right_hand])
+        left_hand = self.get_current_hand_position('left').flatten()  # Ensure 1D array. [0]
+        right_hand = self.get_current_hand_position('right').flatten()  # Ensure 1D array. [1]
+        # arm_status
+        # self.left_jpos = tmp_arms_status[:7]
+        # self.right_jpos = tmp_arms_status[7:]
+        return np.concatenate([arm_status[:7], left_hand, arm_status[7:], right_hand])
 
     def _construct_dual_arm_ctrl_msg(self, target_joint: list[float]):
         msg = CmdSetMotorPosition()
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
-        print("target_joint",target_joint)
+        
         for idx, val in enumerate(target_joint):
             cmd = SetMotorPosition()
             if idx < 7:
                 cmd.name = 11+idx
             else:
                 cmd.name = 14+idx 
-            # cmd.pos = val.item()
-            print("val",val)
-            # cmd.pos = float(val)
             cmd.pos = val.item()
-            cmd.spd = 150.0
-            cmd.cur = 80.0
+            cmd.spd = 0.5
+            cmd.cur = 5.0
             msg.cmds.append(cmd)
         
         return msg
@@ -216,56 +201,27 @@ class PolicyAgentNode(Node):
         self.get_logger().info(f'Robotic arm has reached target position')
         return True
     
-    # def control_hand(self, hand_type, position):
-    #     # Control hand
-    #     # Check if position is an array
-    #     if isinstance(position, (list, np.ndarray)):
-    #         # If it's an array, ensure each value is in 0-1 range
-    #         position = [np.clip(float(pos), 0, 1) for pos in position]
-    #         position = [round(pos, 1) for pos in position]
-    #     else:
-    #         # If it's a scalar, convert to array
-    #         position = np.clip(float(position), 0, 1)
-    #         position = round(position, 1)
-    #         position = [position] * 6  # Set all 6 joints to the same position
-        
-    #     msg = JointState()
-    #     msg.header.stamp = self.get_clock().now().to_msg()
-        
-    #     # Set joint names and positions
-    #     msg.name = ['1', '2', '3', '4', '5', '6']
-    #     # Use position array as joint positions
-    #     msg.position = position
-        
-    #     if hand_type == 'left':
-    #         self.left_hand_publisher.publish(msg)
-    #         self.left_hand_pos = position
-    #         self.get_logger().debug(f'Left hand control command sent: {position}')
-    #     else:  # right
-    #         self.right_hand_publisher.publish(msg)
-    #         self.get_logger().debug(f'Right hand control command sent: {position}')
-
-    #BrainCo
-    def control_hand_brainco(self, hand_type, position):
+    def control_hand(self, hand_type, position):
         # Control hand
         # Check if position is an array
+        if isinstance(position, (list, np.ndarray)):
+            # If it's an array, ensure each value is in 0-1 range
+            position = [np.clip(float(pos), 0, 1) for pos in position]
+            position = [round(pos, 1) for pos in position]
+        else:
+            # If it's a scalar, convert to array
+            position = np.clip(float(position), 0, 1)
+            position = round(position, 1)
+            position = [position] * 6  # Set all 6 joints to the same position
         
-        msg = SetMotorMulti()
-
-  
-        print("position",position) 
-
-        if position is not None:
-            msg.positions = position.astype(np.uint16)
-
-        msg.mode = 1
-        # if velocities is not None:
-        #     msg.velocity = velocities
-        # if efforts is not None:
-        #     msg.effort = efforts
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
         
-        # 发布消息
-        # print("msg",msg)
+        # Set joint names and positions
+        msg.name = ['1', '2', '3', '4', '5', '6']
+        # Use position array as joint positions
+        msg.position = position
+        
         if hand_type == 'left':
             self.left_hand_publisher.publish(msg)
             self.left_hand_pos = position
@@ -273,29 +229,33 @@ class PolicyAgentNode(Node):
         else:  # right
             self.right_hand_publisher.publish(msg)
             self.get_logger().debug(f'Right hand control command sent: {position}')
-      
+
     def publish_action(self, action):
         # Publish action
-        target_joint = action[:14]
-        left_hand_pos = action[14:20]
-        right_hand_pos = action[20:]
+        # target_joint = action[:14]
+        # left_hand_pos = action[14:20]
+        # right_hand_pos = action[20:]
         
-        self.get_logger().info(f"Target joints: {target_joint}")
-        self.get_logger().info(f"Left hand position: {left_hand_pos}")
-        self.get_logger().info(f"Right hand position: {right_hand_pos}")
+        # target_joint = action[:7] + action[14:20]
+        target_joint = np.concatenate([action[:7], action[13:20]])
+        left_hand_pos = action[7:13]
+        right_hand_pos = action[20:]
+        # self.get_logger().info(f"Target joints: {target_joint}")
+        # self.get_logger().info(f"Left hand position: {left_hand_pos}")
+        # self.get_logger().info(f"Right hand position: {right_hand_pos}")
         
         # Publish robotic arm control command
         self.dual_arm_controller.publish(self._construct_dual_arm_ctrl_msg(target_joint))
-        # print("left_hand_pos",left_hand_pos)
+        
         # Control left and right hands
-        self.control_hand_brainco('left', left_hand_pos)
-        self.control_hand_brainco('right', right_hand_pos)
+        self.control_hand('left', left_hand_pos)
+        self.control_hand('right', right_hand_pos)
     
     def get_obs(self):
         # Get observations
         obs = {
             'images': {
-                'camera': None
+                'camera_head': None
             },
             'arm_gripper_joints': None
         }
@@ -309,75 +269,68 @@ class PolicyAgentNode(Node):
             self.get_logger().warning("Images not ready yet")
             return None
         
-        obs['images']['camera'] = rgb
-        obs['arm_gripper_joints'] = dual_arm_hand_status
-        return obs
-    
-    def get_obs_reply(self,count=0):
-        # Get observations
-        obs = {
-            'images': {
-                'camera': None
-            },
-            'arm_gripper_joints': None
-        }
-        
-        # Get robotic arm and hand status
-        dual_arm_hand_status = np.concatenate([self.arm_status_list[count], self.left_hand_joints_list[count], self.right_hand_joints_list[count]])
-        
-        
-        obs['images']['camera'] = None
+        obs['images']['camera_head'] = rgb
         obs['arm_gripper_joints'] = dual_arm_hand_status
         return obs
     
     def reset_home(self):
         # Reset to initial position
-        state_2 = [-0.05916397, 0.11694484, 0.00816471, -1.6296118, -0.18107964, -0.1322771, -0.08812793,
-                  -0.00609963, 0.05809595, -0.0326848, -1.6615903, -0.15082923, 0.03735191, 0.00886455]
-        
+        # state_2 = [-0.05916397, 0.11694484, 0.00816471, -1.6296118, -0.18107964, -0.1322771, -0.08812793,
+                #   -0.00609963, 0.05809595, -0.0326848, -1.6615903, -0.15082923, 0.03735191, 0.00886455]
+        state_3 = [-0.1525799448897199,
+                    0.06799564128968774,
+                    0.1352429110829423,
+                    -1.1551348918821753,
+                    0.12439771977866568,
+                    -0.36139144432253956,
+                    -0.00591924481275605,
+                    -0.29126099842350656,
+                    -0.003778287841052544,
+                    -0.13665378849680831,
+                    -0.8683540414019328,
+                    -0.287210096964022,
+                    -0.4483082608478825,
+                    0.19435190805574742]
         self.get_logger().info("Resetting to initial position...")
-        time.sleep(5)  # Wait for system to stabilize
-        self.reach_target_joint(state_2)
+        time.sleep(3)  # Wait for system to stabilize
+        self.reach_target_joint(state_3)
         
-        hand_state = [0,0,0,0,0,0]
-        hand_state = [99] * 6 # Close hands
         # Control left and right hands to initial position
-        self.control_hand_brainco('left', np.asarray(hand_state))
-        self.control_hand_brainco('right',  np.asarray(hand_state))
+        self.control_hand('left', 1.0)
+        self.control_hand('right', 1.0)
         
         self.get_logger().info("Reset to initial position completed")
 
+    def warm_up(self):
+        # Wait for a while to allow subscribers to receive messages
+        time.sleep(3)
+        self.get_logger().info('System warm-up completed')
 
-    def run_obs(self):
+    def run(self):
+        """Run the main loop of the node"""
         self.warm_up()
+        self.get_logger().info("Starting reset home")
         self.reset_home()
+        self.get_logger().info("Ending reset home")
         
         self.get_logger().info("Starting main loop")
-    
-        print("Starting main loop")
+        
         # Test flag for controlling hand open/close
         test_open = True
         test_counter = 0
-
-
+        
         while rclpy.ok():
             # Get observations
-            obs = self.get_obs() 
-            # print("obs",obs)
+            obs = self.get_obs()
             if obs is None:
                 self.get_logger().warning("Observations not ready yet")
                 time.sleep(0.1)  # Brief wait before retry
                 continue
-            # breakpoint()
+            print("obs[arm_gripper_joints]:",obs['arm_gripper_joints'])
             action = self.action_policy.inference(obs)
-            self.get_logger().info(f"Policy output: {action[0][0].numpy()}")
-            self.publish_action(action[0][0].numpy()) 
+            self.get_logger().info(f"Policy output: {action[0].numpy()}")
+            self.publish_action(action[0].numpy())
             time.sleep(0.05)
-
-    def run(self):
-        """Run the main loop of the node"""
-        self.run_obs()
-        
 
 
 def main(args=None):
@@ -398,7 +351,7 @@ def main(args=None):
         executor_thread.start()
         
         # Run main loop
-        node.run() 
+        node.run()
         
     except KeyboardInterrupt:
         pass
